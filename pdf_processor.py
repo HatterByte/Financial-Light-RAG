@@ -249,3 +249,33 @@ class FinancialPDFProcessor:
         analysis['total_financial_indicators'] = total_indicators
         
         return analysis
+
+# Example usage and testing
+def main():
+    """Example usage"""
+    processor = FinancialPDFProcessor()
+    
+    # Test with a single file
+    test_file = "sample_financial_report.pdf"
+    if Path(test_file).exists():
+        doc = processor.process_pdf_file(test_file)
+        if doc:
+            print(f"✅ Processed: {doc.file_name}")
+            print(f"📄 Pages: {doc.total_pages}")
+            print(f"📝 Characters: {len(doc.text_content):,}")
+            print(f"🔍 Financial indicators: {doc.metadata['financial_indicators']['total_financial_indicators']}")
+        else:
+            print("❌ Failed to process file")
+    else:
+        print(f"ℹ️  Test file {test_file} not found")
+    
+    # Test with directory
+    test_dir = "./pdf_documents"
+    if Path(test_dir).exists():
+        docs = processor.process_pdf_directory(test_dir)
+        print(f"📂 Processed {len(docs)} documents from {test_dir}")
+    else:
+        print(f"ℹ️  Test directory {test_dir} not found")
+
+if __name__ == "__main__":
+    main()
