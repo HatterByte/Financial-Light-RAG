@@ -179,4 +179,73 @@ class FinancialPDFProcessor:
             logger.error(f"PyPDF2 extraction failed for {file_path.name}: {e}")
             return ""
     
+    def _get_page_count(self, file_path: Path) -> int:
+        """Get the number of pages in the PDF"""
+        try:
+            with open(file_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                return len(pdf_reader.pages)
+        except:
+            try:
+                with pdfplumber.open(file_path) as pdf:
+                    return len(pdf.pages)
+            except:
+                return 0
     
+    def _table_to_text(self, table) -> str:
+        """Convert table data to readable text"""
+        if not table:
+            return ""
+        
+        try:
+            text_lines = []
+            for row in table:
+                if row and any(cell for cell in row if cell):  # Skip empty rows
+                    # Clean and join cells
+                    clean_cells = [str(cell).strip() if cell else "" for cell in row]
+                    if any(clean_cells):  # Only add non-empty rows
+                        text_lines.append(" | ".join(clean_cells))
+            
+            return "\n".join(text_lines)
+        except Exception as e:
+            logger.warning(f"Error converting table to text: {e}")
+            return ""
+    
+    def _clean_text(self, text: str) -> str:
+        """Clean and normalize extracted text"""
+        if not text:
+            return ""
+        
+        # Remove excessive whitespace
+        text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)  # Multiple newlines to double
+        text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces to single
+        
+        # Remove page headers/footers patterns
+        text = re.sub(r'\n\s*Page \d+.*?\n', '\n', text, flags=re.IGNORECASE)
+        text = re.sub(r'\n\s*\d+\s*\n', '\n', text)  # Standalone page numbers
+        
+        # Fix common PDF extraction issues
+        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)  # Missing spaces between words
+        text = re.sub(r'(\d)([A-Za-z])', r'\1 \2', text)  # Space between numbers and letters
+        
+        # Normalize financial data
+        text = re.sub(r'\$\s+(\d)', r'$\1', text)  # Fix "$  123" to "$123"
+        text = re.sub(r'(\d)\s+%', r'\1%', text)  # Fix "12 %" to "12%"
+        
+        return text.strip()
+    
+    def _analyze_financial_content(self, text: str) -> dict:
+        """Analyze text for financial content indicators"""
+        analysis = {}
+        
+        for pattern_name, pattern in self.financial_patterns.items():
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            analysis[pattern_name] = len(matches)
+        
+        # Calculate financial relevance score
+        total_indicators = sum(analysis.values())
+        word_count = len(text.split())
+        analysis['financial_density'] = total_indicators / word_count if word_count > 0 else 0
+        analysis['total_financial_indicators'] = total_indicators
+        
+        return analysis
