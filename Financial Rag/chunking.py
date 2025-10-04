@@ -149,4 +149,242 @@ class AdvancedFinancialChunker:
         
         return sections
     
+    def _create_adaptive_chunks(self, text: str, doc_id: str, structure: Dict[str, Any]) -> List[TextChunk]:
+        """Create chunks with adaptive sizing based on content importance"""
+        
+        chunks = []
+        chunk_index = 0
+        
+        with tqdm(structure['sections'], desc="Creating adaptive chunks", leave=False) as section_pbar:
+            
+            for section in structure['sections']:
+                section_text = text[section['start']:section['end']].strip()
+                
+                if len(section_text) < self.min_chunk_size:
+                    section_pbar.update(1)
+                    continue
+                
+                # Adaptive chunk size based on importance
+                importance = section['importance']
+                adaptive_chunk_size = int(self.base_chunk_size * (0.7 + 0.6 * importance))
+                adaptive_overlap = int(adaptive_chunk_size * self.overlap_ratio)
+                
+                # Create chunks for this section
+                section_chunks = self._split_section_smartly(
+                    section_text, 
+                    adaptive_chunk_size, 
+                    adaptive_overlap,
+                    section['type']
+                )
+                
+                # Convert to TextChunk objects
+                for chunk_text in section_chunks:
+                    chunk = TextChunk(
+                        id=f"{doc_id}_chunk_{chunk_index}",
+                        content=chunk_text,
+                        doc_id=doc_id,
+                        chunk_index=chunk_index,
+                        tokens=len(chunk_text.split()),
+                        section_title=section['title'],
+                        section_index=len(chunks),
+                        metadata={
+                            'section_type': section['type'],
+                            'section_importance': section['importance'],
+                            'adaptive_chunk_size': adaptive_chunk_size,
+                            'section_start': section['start'],
+                            'section_end': section['end'],
+                            'created_at': datetime.now().isoformat(),
+                            'chunk_chars': len(chunk_text)
+                        }
+                    )
+                    
+                    chunks.append(chunk)
+                    chunk_index += 1
+                    
+                    # Safety check
+                    if len(chunks) >= self.max_chunks_per_doc:
+                        logger.warning(f"Reached max chunks limit for {doc_id}")
+                        section_pbar.close()
+                        return chunks
+                
+                section_pbar.update(1)
+                section_pbar.set_postfix({
+                    "Chunks": len(chunks),
+                    "Type": section['type'][:8],
+                    "Importance": f"{importance:.2f}"
+                })
+        
+        return chunks
     
+    def _split_section_smartly(self, text: str, chunk_size: int, overlap: int, section_type: str) -> List[str]:
+        """Smart section splitting with financial content awareness"""
+        
+        if len(text) <= chunk_size:
+            return [text]
+        
+        chunks = []
+        start = 0
+        iteration_count = 0
+        max_iterations = len(text) // 50 + 100
+        
+        # Financial content markers for better splitting
+        financial_markers = [
+            r'\$[\d,.]+(?: million| billion| thousand)?',  # Dollar amounts
+            r'\d+\.?\d*%',  # Percentages
+            r'(?:Q[1-4]|quarter|fiscal year|FY)\s+\d{4}',  # Time periods
+            r'(?:revenue|profit|loss|earnings|sales|income|ebitda)',  # Financial terms
+        ]
+        
+        while start < len(text) and iteration_count < max_iterations:
+            iteration_count += 1
+            
+            end = min(start + chunk_size, len(text))
+            
+            # Smart boundary detection based on content type
+            if end < len(text):
+                end = self._find_smart_boundary(text, start, end, section_type, financial_markers)
+            
+            # Extract and validate chunk
+            chunk_text = text[start:end].strip()
+            
+            if chunk_text and len(chunk_text) >= self.min_chunk_size:
+                chunks.append(chunk_text)
+            elif chunk_text and len(chunks) == 0:
+                # Keep short chunks if they're the only content
+                chunks.append(chunk_text)
+            
+            # Calculate next start position
+            new_start = end - overlap
+            
+            # Ensure progress to prevent infinite loops
+            if new_start <= start:
+                new_start = start + max(self.min_chunk_size, chunk_size // 4)
+            
+            start = new_start
+            
+            # Safety break
+            if iteration_count >= max_iterations:
+                logger.warning(f"Iteration limit reached for section type: {section_type}")
+                break
+        
+        return chunks
+    
+    def _find_smart_boundary(self, text: str, start: int, end: int, section_type: str, financial_markers: List[str]) -> int:
+        """Find intelligent chunk boundaries based on content type"""
+        
+        # Look for natural boundaries in a window around the target end
+        search_window = min(200, (end - start) // 3)
+        search_start = max(start, end - search_window)
+        search_end = min(len(text), end + search_window // 2)
+        search_text = text[search_start:search_end]
+        
+        # Priority 1: Financial statement boundaries (for financial sections)
+        if section_type in ['financial_performance', 'revenue_analysis', 'profitability']:
+            financial_boundaries = []
+            for pattern in financial_markers:
+                for match in re.finditer(pattern, search_text):
+                    boundary_pos = search_start + match.end()
+                    if boundary_pos > start + self.min_chunk_size:
+                        financial_boundaries.append(boundary_pos)
+            
+            if financial_boundaries:
+                # Use the boundary closest to target end
+                closest_boundary = min(financial_boundaries, key=lambda x: abs(x - end))
+                if abs(closest_boundary - end) < search_window:
+                    return closest_boundary
+        
+        # Priority 2: Sentence boundaries
+        sentence_pattern = r'[.!?]\s+'
+        sentence_matches = []
+        for match in re.finditer(sentence_pattern, search_text):
+            boundary_pos = search_start + match.end()
+            if boundary_pos > start + self.min_chunk_size:
+                sentence_matches.append(boundary_pos)
+        
+        if sentence_matches:
+            # Prefer boundaries closer to target end
+            best_boundary = min(sentence_matches, key=lambda x: abs(x - end))
+            return best_boundary
+        
+        # Priority 3: Paragraph boundaries
+        paragraph_pattern = r'\n\s*\n'
+        for match in re.finditer(paragraph_pattern, search_text):
+            boundary_pos = search_start + match.start()
+            if boundary_pos > start + self.min_chunk_size:
+                return boundary_pos
+        
+        # Fallback: Use original end
+        return end
+    
+    def _validate_and_enhance_chunks(self, chunks: List[TextChunk], doc_id: str) -> List[TextChunk]:
+        """Validate and enhance chunks with additional metadata"""
+        
+        validated_chunks = []
+        
+        for chunk in chunks:
+            # Skip empty or too-short chunks
+            if not chunk.content or len(chunk.content.strip()) < self.min_chunk_size:
+                continue
+            
+            # Enhance metadata with content analysis
+            content_analysis = self._analyze_chunk_content(chunk.content)
+            chunk.metadata.update(content_analysis)
+            
+            # Add financial relevance score
+            chunk.metadata['financial_relevance'] = self._calculate_financial_relevance(chunk.content)
+            
+            validated_chunks.append(chunk)
+        
+        # Re-index chunks
+        for i, chunk in enumerate(validated_chunks):
+            chunk.chunk_index = i
+            chunk.id = f"{doc_id}_chunk_{i}"
+        
+        return validated_chunks
+    
+    def _analyze_chunk_content(self, content: str) -> Dict[str, Any]:
+        """Analyze chunk content for financial indicators"""
+        
+        analysis = {
+            'has_numbers': bool(re.search(r'\d+', content)),
+            'has_percentages': bool(re.search(r'\d+\.?\d*%', content)),
+            'has_currency': bool(re.search(r'\$[\d,]+', content)),
+            'has_dates': bool(re.search(r'\b\d{4}\b|\b(?:Q[1-4]|quarter)\b', content)),
+            'sentence_count': len(re.findall(r'[.!?]+', content)),
+            'word_count': len(content.split()),
+            'avg_sentence_length': 0
+        }
+        
+        if analysis['sentence_count'] > 0:
+            analysis['avg_sentence_length'] = analysis['word_count'] / analysis['sentence_count']
+        
+        return analysis
+    
+    def _calculate_financial_relevance(self, content: str) -> float:
+        """Calculate financial relevance score for content"""
+        
+        financial_terms = [
+            'revenue', 'profit', 'loss', 'earnings', 'sales', 'income', 'ebitda',
+            'margin', 'cash', 'debt', 'equity', 'assets', 'liabilities',
+            'growth', 'decline', 'increase', 'decrease', 'performance',
+            'quarter', 'annual', 'fiscal', 'financial', 'business'
+        ]
+        
+        content_lower = content.lower()
+        score = 0.0
+        
+        # Term frequency scoring
+        for term in financial_terms:
+            count = content_lower.count(term)
+            score += count * 0.1
+        
+        # Financial indicators
+        if re.search(r'\$[\d,]+', content):
+            score += 0.3
+        if re.search(r'\d+\.?\d*%', content):
+            score += 0.2
+        if re.search(r'\b(?:Q[1-4]|quarter|fiscal)\s+\d{4}', content):
+            score += 0.2
+        
+        # Normalize to 0-1 range
+        return min(1.0, score)
